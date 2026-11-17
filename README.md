@@ -32,6 +32,16 @@
 - 重切失败整笔回滚 vs 保留已完整分区
 - 放行与水位同步闸 vs 异步放行后纠偏
 
+## 水位读法（钉住：甲）
+
+现行水位与历史水位**分接口、分缓存键**，历史翻页禁止写入现行缓存键；缺现行必须落显式空态原因，禁止静默空白，也禁止拿历史首条冒充现行。完整口径、并发排队（读争用）、五处对齐与验收要求见 [水位读法说明.md](水位读法说明.md)。
+
+| 用途 | 接口 |
+|------|------|
+| 现行水位 | `GET /api/watermarks/current?consumer=<消费方>` |
+| 历史水位（分页） | `GET /api/watermarks/history?consumer=<消费方>&limit=&cursor=` |
+| 读策略 / 读审计 / 读缓存 | `GET /api/watermarks/read-policy` · `/read-audit` · `/read-cache` |
+
 ## 启动（一键）
 
 `powershell

@@ -33,6 +33,18 @@
   .err{color:var(--bad);min-height:18px;font-size:13px}
   .kpi{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
   .kpi .panel{padding:12px}.kpi b{display:block;font-size:22px;margin-top:4px}
+  .policy-bar{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;margin-bottom:12px;padding:9px 12px;border:1px dashed var(--line);border-radius:10px;background:#0e1626;font-size:12px;color:var(--muted)}
+  .policy-bar b{color:var(--text)}
+  .policy-bar .mono{color:var(--accent)}
+  .empty-note{border:1px solid #3a2f18;background:#1d1810;color:#f0c674;border-radius:8px;padding:9px 11px;font-size:12px;margin:6px 0}
+  .side-note{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.6}
+  .side-note .mono{color:#c9d4ea}
+  .detail{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-top:10px;font-size:12px;background:#0e1626}
+  .detail .mono{color:#c9d4ea}
+  .pager{display:flex;gap:8px;align-items:center;margin-top:10px;font-size:12px;color:var(--muted)}
+  .pager button{background:#18233a;border:1px solid var(--line);color:var(--text);padding:5px 10px;border-radius:7px;cursor:pointer}
+  .pager button:disabled{opacity:.4;cursor:not-allowed}
+  .bad-tag{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;background:#2a1518;color:var(--bad)}
 </style>
 </head>
 <body>
@@ -55,12 +67,19 @@ createApp({
     const token=ref(localStorage.getItem('slicegate_token')||'');
     const user=ref(localStorage.getItem('slicegate_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
-    const slices=ref([]), releases=ref([]), watermarks=ref([]);
+    const slices=ref([]), releases=ref([]);
+    const wmCurrent=ref(null), wmHistory=ref(null), wmPolicy=ref(null), wmAudit=ref(null);
+    const wmHistCursor=ref(null), wmHistDetail=ref(null), wmErr=ref('');
     const form=ref({slice_no:'SL-2026-11-03-east',biz_date:'2026-11-03',partition_key:'east',row_count:1000,expected_count:1000});
     const releaseSliceId=ref(1), consumer=ref('ads_order');
     const nav=['切片登记','完整度裁决','下游放行','消费水位'];
     const completeCnt=computed(()=>slices.value.filter(s=>s.completeness==='完整').length);
     const openCnt=computed(()=>slices.value.filter(s=>s.release_status!=='已放行').length);
+    const wmCurrentRows=computed(()=>Array.isArray(wmCurrent.value?.items)?wmCurrent.value.items:[]);
+    const wmHistoryRows=computed(()=>Array.isArray(wmHistory.value?.items)?wmHistory.value.items:[]);
+    const wmCurrentEmpty=computed(()=>wmCurrent.value?.state==='empty');
+    const wmHistoryEmpty=computed(()=>wmHistory.value?.state==='empty');
+    const policyLine=computed(()=>wmPolicy.value?`读法 ${wmPolicy.value.pinned_option} · 现行 ${wmPolicy.value.current_endpoint} · 历史 ${wmPolicy.value.history_endpoint} · 不混申读`:'读法加载中…');
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
       err.value='';
@@ -83,15 +102,53 @@ createApp({
       slices.value=Array.isArray(s.items)?s.items:[];
       const rel=await loadJson('/api/releases'); if(rel===null) return;
       releases.value=Array.isArray(rel.items)?rel.items:[];
-      const w=await loadJson('/api/watermarks'); if(w===null) return;
-      watermarks.value=Array.isArray(w.items)?w.items:[];
       if(slices.value.length) releaseSliceId.value=slices.value[0].id;
+      // 水位只走现行/历史两个分接口，不再读旧账本接口，避免混申读。
+      await loadWmPolicy();
+      await loadWmCurrent();
+      await loadWmHistory(null);
+      await loadWmAudit();
     }
+    // 五处对齐的单一策略行；五处都只引用它，不各自推断读法。
+    async function loadWmPolicy(){const p=await loadJson('/api/watermarks/read-policy'); if(p) wmPolicy.value=p;}
+    async function loadWmAudit(){const a=await loadJson('/api/watermarks/read-audit?limit=20'); if(a) wmAudit.value=a;}
+    // 现行读：独立接口；缺现行时展示显式空态原因，不静默空白。
+    async function loadWmCurrent(){
+      wmErr.value='';
+      const q=consumer.value?('?consumer='+encodeURIComponent(consumer.value)):'';
+      const r=await loadJson('/api/watermarks/current'+q);
+      if(r && r.code==='水位读口径偏了'){wmErr.value=r.message; return;}
+      wmCurrent.value=r;
+    }
+    // 历史翻页：独立接口 + 独立缓存键；绝不写现行缓存键，也不拿历史首条冒充现行。
+    async function loadWmHistory(cursor){
+      wmErr.value='';
+      const qs=['limit=20'];
+      if(consumer.value) qs.push('consumer='+encodeURIComponent(consumer.value));
+      if(cursor) qs.push('cursor='+cursor);
+      const r=await loadJson('/api/watermarks/history?'+qs.join('&'));
+      if(r && r.code==='水位读口径偏了'){wmErr.value=r.message; return;}
+      wmHistory.value=r;
+      wmHistCursor.value=r?.next_cursor||null;
+      if(wmHistDetail.value){const id=wmHistDetail.value.id; wmHistDetail.value=(r?.items||[]).find(i=>i.id===id)||null;}
+      await loadWmPolicy();
+      await loadWmAudit();
+    }
+    async function wmHistoryPage(dir){
+      const cursor=dir<0?null:(wmHistCursor.value||undefined);
+      await loadWmHistory(cursor);
+      await loadWmCurrent();
+    }
+    function openWmHistory(w){wmHistDetail.value=w;}
     async function createSlice(){actionErr.value='';const r=await fetch('/api/slices',{method:'POST',headers:auth(),body:JSON.stringify(form.value)});const j=await r.json();if(!r.ok)actionErr.value=j.detail||'失败';await refresh();}
     async function evaluate(id){await fetch('/api/slices/'+id+'/evaluate',{method:'POST',headers:auth()});await refresh();}
     async function doRelease(){actionErr.value='';const r=await fetch('/api/slices/'+releaseSliceId.value+'/release',{method:'POST',headers:auth(),body:JSON.stringify({consumer:consumer.value})});const j=await r.json();if(!r.ok)actionErr.value=j.detail||'放行失败';await refresh();}
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,slices,releases,watermarks,form,releaseSliceId,consumer,actionErr,completeCnt,openCnt,login,logout,createSlice,evaluate,doRelease};
+    return {token,user,username,password,err,tab,nav,slices,releases,form,releaseSliceId,consumer,actionErr,
+      completeCnt,openCnt,
+      wmCurrent,wmHistory,wmPolicy,wmAudit,wmHistCursor,wmHistDetail,wmErr,
+      wmCurrentRows,wmHistoryRows,wmCurrentEmpty,wmHistoryEmpty,policyLine,
+      login,logout,createSlice,evaluate,doRelease,loadWmCurrent,loadWmHistory,wmHistoryPage,openWmHistory};
   },
   template:`
   <div v-if="!token" class="login">
@@ -106,6 +163,16 @@ createApp({
       <div class="user">{{user}}</div><button class="ghost" @click="logout">退出</button>
     </div>
     <main>
+      <!-- 策略条（五处对齐 #5）：常驻显示钉住的读法，其它四处只引用本策略行。 -->
+      <div class="policy-bar" data-wm-place="policy-bar">
+        <span>水位读法 <b>{{wmPolicy?wmPolicy.pinned_option:'甲'}}</b></span>
+        <span class="mono">{{wmPolicy?wmPolicy.current_endpoint:'/api/watermarks/current'}}</span>
+        <span class="mono">{{wmPolicy?wmPolicy.history_endpoint:'/api/watermarks/history'}}</span>
+        <span>键 <span class="mono">wm:current:*</span> / <span class="mono">wm:history:*</span> 互不清写</span>
+        <span>读争用 <b>{{wmAudit?wmAudit.contention_count:0}}</b></span>
+        <span>偏离 <b>{{wmAudit?wmAudit.deviation_count:0}}</b></span>
+        <span class="mono">{{wmPolicy?wmPolicy.doc:'水位读法说明.md'}}</span>
+      </div>
       <div class="kpi">
         <div class="panel">切片总数<b class="mono">{{slices.length}}</b></div>
         <div class="panel">已完整<b class="mono">{{completeCnt}}</b></div>
@@ -121,6 +188,15 @@ createApp({
             <td><span class="tag" :class="{bad:s.completeness!=='完整'}">{{s.completeness}}</span></td>
             <td><button class="ghost" @click="evaluate(s.id)">重裁</button></td>
           </tr></tbody></table>
+          <!-- 列表旁注（五处对齐 #4）：只引用统一策略行与现行读结果，不自行推断水位。 -->
+          <div class="side-note" data-wm-place="list-side-note">
+            <div>水位读法 <b>{{wmPolicy?wmPolicy.pinned_option:'甲'}}</b>：现行读 <span class="mono">/api/watermarks/current</span>，历史翻页另走 <span class="mono">/api/watermarks/history</span>，两者分缓存键。</div>
+            <div v-if="wmCurrentEmpty">现行空态：<span class="mono">{{wmCurrent.reason_code}}</span> · {{wmCurrent.reason}}</div>
+            <div v-else-if="wmCurrentRows.length">现行（{{wmCurrentRows.length}} 个消费方）：
+              <span v-for="w in wmCurrentRows" :key="'sn'+w.id" class="mono">{{w.consumer}}@{{w.watermark}} </span>
+            </div>
+            <div v-else>现行读取中…</div>
+          </div>
         </div>
         <div class="panel">
           <h2>登记切片</h2>
@@ -149,14 +225,63 @@ createApp({
         </div>
         <div class="panel">
           <h2>放行流水</h2>
+          <!-- 放行流水（五处对齐 #3）：放行只追加现行，历史页不改写现行。 -->
+          <div class="side-note" data-wm-place="release-flow">
+            放行成功即追加一条现行水位；读法 <b>{{wmPolicy?wmPolicy.pinned_option:'甲'}}</b>，现行 <span class="mono">/api/watermarks/current</span>、历史 <span class="mono">/api/watermarks/history</span> 分接口分缓存键，历史翻页不会清掉现行。
+          </div>
           <table><thead><tr><th>切片</th><th>下游</th><th>结果</th><th>时间</th></tr></thead>
           <tbody><tr v-for="r in releases" :key="r.id"><td class="mono">{{r.slice_no}}</td><td>{{r.consumer}}</td><td>{{r.status}}</td><td class="mono">{{r.created_at}}</td></tr></tbody></table>
         </div>
       </div>
-      <div v-show="tab===3" class="panel">
-        <h2>消费水位</h2>
-        <table><thead><tr><th>消费方</th><th>业务日</th><th>水位</th><th>来源切片</th></tr></thead>
-        <tbody><tr v-for="w in watermarks" :key="w.id"><td>{{w.consumer}}</td><td>{{w.biz_date}}</td><td class="mono">{{w.watermark}}</td><td class="mono">{{w.source_slice}}</td></tr></tbody></table>
+      <div v-show="tab===3" class="grid">
+        <div class="panel">
+          <h2>消费水位 · 现行</h2>
+          <!-- 水位页（五处对齐 #1）：现行卡单读独立接口；空态必须给原因。 -->
+          <div data-wm-place="watermark-page">
+            <div class="row"><div><label>消费方</label><input v-model="consumer" @change="loadWmCurrent();loadWmHistory(null)"/></div><div><label>读法</label><input :value="policyLine" readonly/></div></div>
+            <div class="err">{{wmErr}}</div>
+            <div v-if="wmCurrentEmpty" class="empty-note">
+              现行空态（显式）：<span class="mono">{{wmCurrent.reason_code}}</span> · {{wmCurrent.reason}}
+            </div>
+            <div v-else-if="wmCurrentRows.length">
+              <div v-for="w in wmCurrentRows" :key="'cur'+w.id" class="detail">
+                <div>消费方 <b>{{w.consumer}}</b> · 业务日 <span class="mono">{{w.biz_date}}</span></div>
+                <div>现行水位 <span class="mono">{{w.watermark}}</span> · 来源 <span class="mono">{{w.source_slice}}</span></div>
+                <div>缓存键 <span class="mono">{{wmCurrent.cache_key}}</span> · 命中 {{wmCurrent.cache_hit?'是':'否'}}</div>
+              </div>
+            </div>
+            <div v-else>现行读取中…</div>
+          </div>
+          <h2 style="margin-top:14px">历史 · 分页</h2>
+          <table><thead><tr><th>消费方</th><th>业务日</th><th>水位</th><th>来源切片</th><th></th></tr></thead>
+          <tbody><tr v-for="w in wmHistoryRows" :key="'h'+w.id">
+            <td>{{w.consumer}}</td><td>{{w.biz_date}}</td><td class="mono">{{w.watermark}}</td><td class="mono">{{w.source_slice}}</td>
+            <td><button class="ghost" @click="openWmHistory(w)">详情</button></td>
+          </tr></tbody></table>
+          <div v-if="wmHistoryEmpty" class="empty-note">
+            历史空态（显式）：<span class="mono">{{wmHistory.reason_code}}</span> · {{wmHistory.reason}}
+          </div>
+          <div class="pager">
+            <button @click="wmHistoryPage(-1)">回到首页</button>
+            <button :disabled="!wmHistCursor" @click="wmHistoryPage(1)">下一页</button>
+            <span>当前页 {{wmHistoryRows.length}} 条 · 历史键 <span class="mono">{{wmHistory?wmHistory.cache_key:'—'}}</span></span>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>历史详情</h2>
+          <!-- 历史详情（五处对齐 #2）：只显示历史条目，明确标注“非现行”。 -->
+          <div data-wm-place="history-detail">
+            <div v-if="wmHistDetail" class="detail">
+              <div>消费方 <b>{{wmHistDetail.consumer}}</b> <span class="bad-tag">历史 · 非现行</span></div>
+              <div>业务日 <span class="mono">{{wmHistDetail.biz_date}}</span></div>
+              <div>历史水位 <span class="mono">{{wmHistDetail.watermark}}</span></div>
+              <div>来源切片 <span class="mono">{{wmHistDetail.source_slice}}</span></div>
+              <div>行角色 <span class="mono">{{wmHistDetail.row_role}}</span> · 历史页已排除现行 id <span class="mono">{{wmHistory?wmHistory.excluded_current_id:'—'}}</span></div>
+              <div class="side-note">现行请单独读取 <span class="mono">/api/watermarks/current</span>；禁止拿历史首条冒充现行。</div>
+            </div>
+            <div v-else class="side-note">从左侧历史分页点「详情」查看；此处永不展示现行条目。</div>
+          </div>
+        </div>
       </div>
     </main>
   </div>`
